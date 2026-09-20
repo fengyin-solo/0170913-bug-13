@@ -26,6 +26,38 @@
   // ====================== DOM 元素缓存 ======================
   var elements = {};
 
+  /**
+   * 按一级行业分组（列表与下拉共用，保证两处顺序与内容始终一致）
+   * @returns {Array<{level1:string, parent:Object|null, children:Array}>}
+   */
+  function buildIndustryGroups() {
+    var level1Only = state.industries.filter(function (i) { return !i.level2; });
+    var level2List = state.industries.filter(function (i) { return i.level2; });
+
+    var level1Order = [];
+    level1Only.forEach(function (i) {
+      if (level1Order.indexOf(i.level1) === -1) level1Order.push(i.level1);
+    });
+    level2List.forEach(function (i) {
+      if (level1Order.indexOf(i.level1) === -1) level1Order.push(i.level1);
+    });
+
+    return level1Order.map(function (l1) {
+      return {
+        level1: l1,
+        parent: level1Only.find(function (i) { return i.level1 === l1; }) || null,
+        children: level2List.filter(function (i) { return i.level1 === l1; })
+      };
+    });
+  }
+
+  /** 当前 currentIndustryId 指向的行业若已不存在则清空，避免筛选停留在失效行业上 */
+  function ensureCurrentIndustryExists() {
+    if (!state.currentIndustryId) return;
+    var exists = state.industries.some(function (i) { return i.id === state.currentIndustryId; });
+    if (!exists) state.currentIndustryId = '';
+  }
+
   function cacheElements() {
     elements = {
       btnAddIndustry: document.getElementById('btnAddIndustry'),
@@ -62,31 +94,38 @@
   var IndustryManager = {
     render: function () {
       state.industries = MockStore.getIndustries();
-      var level1Only = state.industries.filter(function (i) { return !i.level2; });
-      var level2List = state.industries.filter(function (i) { return i.level2; });
-      
-      var level1Order = [];
-      level1Only.forEach(function (i) {
-        if (level1Order.indexOf(i.level1) === -1) level1Order.push(i.level1);
-      });
-      level2List.forEach(function (i) {
-        if (level1Order.indexOf(i.level1) === -1) level1Order.push(i.level1);
-      });
-      
+      ensureCurrentIndustryExists();
+
+      var groups = buildIndustryGroups();
       var rows = [];
-      level1Order.forEach(function (l1) {
-        var parent = level1Only.find(function (i) { return i.level1 === l1; });
-        var children = level2List.filter(function (i) { return i.level1 === l1; });
-        
-        if (parent) {
-          rows.push({ type: 'parent', data: parent });
+      groups.forEach(function (group) {
+        if (group.parent) {
+          rows.push({ type: 'parent', data: group.parent });
+          if (group.children.length === 0) {
+            // 下属分类暂无内容时给出空态说明，不留白
+            rows.push({ type: 'children-empty', level1: group.level1 });
+          }
         }
-        children.forEach(function (c) {
-          rows.push({ type: 'child', data: c, hasParent: !!parent });
+        group.children.forEach(function (c) {
+          rows.push({ type: 'child', data: c, hasParent: !!group.parent });
         });
       });
 
+      if (rows.length === 0) {
+        rows.push({ type: 'all-empty' });
+      }
+
       Table.render(elements.industryTableBody, rows, function (row) {
+        if (row.type === 'all-empty') {
+          return '<td colspan="4" class="empty-state text-slate-500">暂无行业数据，点击右上角「新增行业」开始配置。</td>';
+        }
+        if (row.type === 'children-empty') {
+          return '<td colspan="4" class="pl-10 py-3 text-slate-400 text-sm">' +
+            '<span class="inline-flex items-center gap-2">' +
+            '<span class="iconify" data-icon="lucide:folder-input" data-width="14" data-height="14"></span>' +
+            Utils.escapeHtml(row.level1) + ' 下暂无二级行业，新增行业时选择该一级行业即可补充二级分类。' +
+            '</span></td>';
+        }
         var i = row.data;
         if (row.type === 'parent') {
           return '<td class="text-slate-900 font-medium">' + Utils.escapeHtml(i.level1) + '</td>' +
@@ -117,43 +156,58 @@
       });
       tbody.querySelectorAll('.ind-delete').forEach(function (btn) {
         btn.addEventListener('click', function () {
-          Confirm.show('确定删除该行业？其下知识将一并清除。', function () {
-            MockStore.deleteIndustry(btn.dataset.id);
-            if (state.currentIndustryId === btn.dataset.id) {
+          var id = btn.dataset.id;
+          var target = state.industries.find(function (i) { return i.id === id; });
+          if (!target) {
+            Toast.show('行业不存在或已被删除', 'error');
+            self.render();
+            self.fillSelect();
+            return;
+          }
+          var isLevel1 = !target.level2;
+          var confirmMsg = isLevel1
+            ? '确定删除一级行业「' + target.level1 + '」？'
+            : '确定删除二级行业「' + target.level1 + ' / ' + target.level2 + '」？其下知识将一并清除。';
+          Confirm.show(confirmMsg, function () {
+            var result = MockStore.deleteIndustry(id);
+            if (!result || !result.success) {
+              // 删除失败或中断：说明原因并保持原样
+              Toast.show((result && result.message) || '删除失败，行业未改动', 'error');
+              return;
+            }
+            if (state.currentIndustryId === id) {
               state.currentIndustryId = '';
             }
             self.render();
             self.fillSelect();
             KnowledgeManager.render();
-            Toast.show('行业删除成功', 'success');
+            var removed = result.data && result.data.deletedKnowledgeCount;
+            Toast.show(removed ? '行业删除成功，已一并清除 ' + removed + ' 条知识' : '行业删除成功', 'success');
           });
         });
       });
     },
 
-    fillSelect: function () {
-      var byLevel1 = {};
-      state.industries.forEach(function (i) {
-        if (!byLevel1[i.level1]) byLevel1[i.level1] = [];
-        byLevel1[i.level1].push(i);
-      });
-      
-      var level1Order = state.level1Options.filter(function (l1) { return byLevel1[l1]; });
-      Object.keys(byLevel1).forEach(function (l1) {
-        if (level1Order.indexOf(l1) === -1) level1Order.push(l1);
-      });
-      
-      var groups = {};
-      level1Order.forEach(function (l1) {
-        groups[l1] = byLevel1[l1].map(function (i) {
-          return {
-            value: i.id,
-            label: i.level2 ? (i.level2 + '（二级）') : '（一级）'
-          };
+    /** 将分组数据转成下拉分组（一级显示行业名，杜绝空名称选项） */
+    groupsToSelectMap: function (groups) {
+      var map = {};
+      groups.forEach(function (group) {
+        var options = [];
+        if (group.parent) {
+          options.push({ value: group.parent.id, label: group.level1 + '（一级）' });
+        }
+        group.children.forEach(function (c) {
+          options.push({ value: c.id, label: c.level2 + '（二级）' });
         });
+        map[group.level1] = options;
       });
-      
-      Select.fillGrouped(elements.industrySelect, groups, '全部行业', state.currentIndustryId);
+      return map;
+    },
+
+    fillSelect: function () {
+      var groups = buildIndustryGroups();
+      var selectMap = this.groupsToSelectMap(groups);
+      Select.fillGrouped(elements.industrySelect, selectMap, '全部行业', state.currentIndustryId);
     },
 
     fillLevel1: function () {
@@ -258,14 +312,19 @@
         }
       }
       
+      var result;
       if (state.editingIndustryId) {
-        MockStore.updateIndustry(state.editingIndustryId, level1, level2);
-        Toast.show('行业信息更新成功', 'success');
+        result = MockStore.updateIndustry(state.editingIndustryId, level1, level2);
       } else {
-        MockStore.createIndustry(level1, level2);
-        Toast.show('行业创建成功', 'success');
+        result = MockStore.createIndustry(level1, level2);
       }
-      
+
+      if (!result || !result.success) {
+        Toast.show((result && result.message) || '保存失败，请稍后重试', 'error');
+        return;
+      }
+
+      Toast.show(state.editingIndustryId ? '行业信息更新成功' : '行业创建成功', 'success');
       this.closeModal();
       this.render();
       this.fillSelect();
@@ -318,10 +377,14 @@
       tbody.querySelectorAll('.k-edit').forEach(function (btn) {
         btn.addEventListener('click', function () {
           var iid = btn.dataset.iid || state.currentIndustryId;
-          if (iid) {
-            state.currentIndustryId = iid;
-            elements.industrySelect.value = iid;
+          var industry = state.industries.find(function (i) { return i.id === iid; });
+          if (!industry) {
+            Toast.show('该知识所属行业不存在或已被删除', 'error');
+            self.render();
+            return;
           }
+          state.currentIndustryId = iid;
+          elements.industrySelect.value = iid;
           self.openModal(btn.dataset.id);
         });
       });
@@ -338,28 +401,9 @@
     },
 
     fillFormSelect: function () {
-      var byLevel1 = {};
-      state.industries.forEach(function (i) {
-        if (!byLevel1[i.level1]) byLevel1[i.level1] = [];
-        byLevel1[i.level1].push(i);
-      });
-      
-      var level1Order = state.level1Options.filter(function (l1) { return byLevel1[l1]; });
-      Object.keys(byLevel1).forEach(function (l1) {
-        if (level1Order.indexOf(l1) === -1) level1Order.push(l1);
-      });
-      
-      var groups = {};
-      level1Order.forEach(function (l1) {
-        groups[l1] = byLevel1[l1].map(function (i) {
-          return {
-            value: i.id,
-            label: i.level2 ? (i.level2 + '（二级）') : '（一级）'
-          };
-        });
-      });
-      
-      Select.fillGrouped(elements.knowledgeFormIndustry, groups, '请选择要添加知识的行业');
+      var groups = buildIndustryGroups();
+      var selectMap = IndustryManager.groupsToSelectMap(groups);
+      Select.fillGrouped(elements.knowledgeFormIndustry, selectMap, '请选择要添加知识的行业');
     },
 
     openModal: function (id) {
@@ -414,21 +458,29 @@
       }
       
       if (state.editingKnowledgeId) {
-        MockStore.updateIndustryKnowledge(industryId, state.editingKnowledgeId, {
+        var updateResult = MockStore.updateIndustryKnowledge(industryId, state.editingKnowledgeId, {
           standardQ: standardQ,
           similarQs: similarQs,
           answer: answer
         });
+        if (!updateResult || !updateResult.success) {
+          Toast.show((updateResult && updateResult.message) || '知识保存失败，请稍后重试', 'error');
+          return;
+        }
         Toast.show('知识更新成功', 'success');
       } else {
-        MockStore.addIndustryKnowledge(industryId, {
+        var addResult = MockStore.addIndustryKnowledge(industryId, {
           standardQ: standardQ,
           similarQs: similarQs,
           answer: answer
         });
+        if (!addResult || !addResult.success) {
+          Toast.show((addResult && addResult.message) || '知识保存失败，请稍后重试', 'error');
+          return;
+        }
         Toast.show('知识创建成功', 'success');
       }
-      
+
       this.closeModal();
       this.render();
     }

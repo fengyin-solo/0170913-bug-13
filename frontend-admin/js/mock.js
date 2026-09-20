@@ -16,17 +16,19 @@
       } catch (_) { return fallback; }
     },
     save: function (key, value) {
-      try { localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value)); } catch (_) {}
+      try { localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value)); return true; }
+      catch (_) { return false; }
     },
     remove: function (key) {
-      try { localStorage.removeItem(STORAGE_PREFIX + key); } catch (_) {}
+      try { localStorage.removeItem(STORAGE_PREFIX + key); return true; }
+      catch (_) { return false; }
     }
   };
 
   // 兼容旧的变量名
   var P = STORAGE_PREFIX;
   function load(key, fallback) { return StorageUtil.load(key, fallback); }
-  function save(key, value) { StorageUtil.save(key, value); }
+  function save(key, value) { return StorageUtil.save(key, value); }
 
   // ====================== 用户认证模块 ======================
   var defaultUsers = [
@@ -253,20 +255,30 @@
     '科技': ['软件', '硬件', '互联网', '云计算'],
   };
 
-  // 生成短 ID，格式如 M006、SET005、k_abc123
+  // 生成短 ID，格式如 M006、SET005、IND008、k_xxx
   function nextId(prefix, existingList) {
-    // 知识条目使用短时间戳
+    // 知识条目使用短时间戳 + 随机后缀，避免同毫秒连增撞号
     if (prefix === 'k') {
-      return 'k_' + Date.now().toString(36);
+      var base = 'k_' + Date.now().toString(36);
+      var candidate = base + Math.random().toString(36).slice(2, 6);
+      var existingIds = {};
+      (existingList || []).forEach(function (item) {
+        if (item && item.id) existingIds[item.id] = true;
+      });
+      var guard = 0;
+      while (existingIds[candidate] && guard++ < 100) {
+        candidate = base + Math.random().toString(36).slice(2, 8);
+      }
+      return candidate;
     }
-    
+
     // 其他类型使用递增编号
     var maxNum = 0;
     var list = existingList || [];
-    
-    // 找出当前最大编号
+    var usedIds = {};
     list.forEach(function (item) {
-      if (item.id) {
+      if (item && item.id) usedIds[item.id] = true;
+      if (item && item.id) {
         // 匹配 M001, SET001, IND01 等格式
         var match = item.id.match(/(\d+)$/);
         if (match) {
@@ -277,11 +289,17 @@
         }
       }
     });
-    
-    // 生成下一个编号，补零到3位
+
+    // 生成下一个编号，补零到3位；若与既有 ID（如 IND_L1_*）冲突则继续递增
     var nextNum = maxNum + 1;
     var padded = ('000' + nextNum).slice(-3);
-    return prefix + padded;
+    var id = prefix + padded;
+    while (usedIds[id]) {
+      nextNum += 1;
+      padded = ('000' + nextNum).slice(-3);
+      id = prefix + padded;
+    }
+    return id;
   }
 
   var store = {
@@ -297,7 +315,7 @@
       var finalId = (id && String(id).trim()) ? String(id).trim() : nextId('M', list);
       list.push({ id: finalId, name: name || '新商家' });
       save('merchants', list);
-      var all = load('merchantKnowledge', {});
+      var all = load('merchantKnowledge', defaultMerchantKnowledge);
       all[finalId] = [];
       save('merchantKnowledge', all);
       return list[list.length - 1];
@@ -313,7 +331,7 @@
     deleteMerchant: function (id) {
       var list = store.getMerchants().filter(function (m) { return m.id !== id; });
       save('merchants', list);
-      var all = load('merchantKnowledge', {});
+      var all = load('merchantKnowledge', defaultMerchantKnowledge);
       delete all[id];
       save('merchantKnowledge', all);
       return list;
@@ -386,7 +404,7 @@
       var id = nextId('SET', sets);
       sets.push({ id: id, name: name, merchantIds: merchantIds || [] });
       save('merchantSets', sets);
-      var all = load('merchantSetKnowledge', {});
+      var all = load('merchantSetKnowledge', defaultMerchantSetKnowledge);
       all[id] = [];
       save('merchantSetKnowledge', all);
       return sets[sets.length - 1];
@@ -402,7 +420,7 @@
     deleteMerchantSet: function (id) {
       var sets = store.getMerchantSets().filter(function (s) { return s.id !== id; });
       save('merchantSets', sets);
-      var all = load('merchantSetKnowledge', {});
+      var all = load('merchantSetKnowledge', defaultMerchantSetKnowledge);
       delete all[id];
       save('merchantSetKnowledge', all);
       return sets;
@@ -444,34 +462,128 @@
       save('industries', list);
       return list;
     },
+    /** 一级行业名称（去除空白后）的展示名 */
+    industryDisplayName: function (level1, level2) {
+      return (level2 == null || level2 === '') ? level1 : (level1 + ' / ' + level2);
+    },
     /** 新增行业：level2 为空表示一级行业，否则为二级行业（挂在该 level1 下） */
     createIndustry: function (level1, level2) {
-      var list = store.getIndustries().slice();
+      level1 = (level1 == null ? '' : String(level1)).trim();
+      level2 = (level2 == null ? '' : String(level2)).trim();
+      if (!level1) {
+        return { success: false, message: '一级行业名称不能为空' };
+      }
+      var list = store.getIndustries();
+
+      // 同级重名校验，避免重复分组 / 下拉出现两个同行业
+      var duplicated = list.some(function (i) {
+        return i.level1 === level1 && (i.level2 || '') === level2;
+      });
+      if (duplicated) {
+        return { success: false, message: '该行业已存在，请勿重复新增' };
+      }
+      if (!level2) {
+        // 已有同名一级（可能仅有二级记录）时也不再创建
+        var sameLevel1 = list.some(function (i) { return i.level1 === level1 && !i.level2; });
+        if (sameLevel1) {
+          return { success: false, message: '一级行业「' + level1 + '」已存在' };
+        }
+      }
+
+      list = list.slice();
       var id = nextId('IND', list);
-      var name = (level2 == null || level2 === '') ? level1 : (level1 + ' / ' + level2);
-      list.push({ id: id, level1: level1, level2: level2 || '', name: name });
-      save('industries', list);
-      var all = load('industryKnowledge', {});
-      all[id] = [];
+      list.push({ id: id, level1: level1, level2: level2, name: store.industryDisplayName(level1, level2) });
+      if (!save('industries', list)) {
+        return { success: false, message: '行业保存失败（本地存储不可用），请稍后重试' };
+      }
+      // 注意：回退默认知识对象，避免新键写入后覆盖掉初始数据
+      var all = load('industryKnowledge', defaultIndustryKnowledge);
+      if (!Object.prototype.hasOwnProperty.call(all, id)) all[id] = [];
       save('industryKnowledge', all);
-      return list[list.length - 1];
+      return { success: true, data: list[list.length - 1] };
     },
     updateIndustry: function (id, level1, level2) {
-      var list = store.getIndustries().map(function (i) {
-        if (i.id !== id) return i;
-        var name = (level2 == null || level2 === '') ? level1 : (level1 + ' / ' + level2);
-        return { id: i.id, level1: level1, level2: level2 || '', name: name };
+      level1 = (level1 == null ? '' : String(level1)).trim();
+      level2 = (level2 == null ? '' : String(level2)).trim();
+      if (!level1) {
+        return { success: false, message: '一级行业名称不能为空' };
+      }
+      var list = store.getIndustries();
+      var target = list.find(function (i) { return i.id === id; });
+      if (!target) {
+        return { success: false, message: '行业不存在或已被删除' };
+      }
+
+      // 同级重名校验（排除自身）
+      var duplicated = list.some(function (i) {
+        return i.id !== id && i.level1 === level1 && (i.level2 || '') === level2;
       });
-      save('industries', list);
-      return list;
+      if (duplicated) {
+        return { success: false, message: '同名行业已存在，无法修改' };
+      }
+
+      var updated = list.map(function (i) {
+        if (i.id !== id) return i;
+        return { id: i.id, level1: level1, level2: level2, name: store.industryDisplayName(level1, level2) };
+      });
+      if (!save('industries', updated)) {
+        return { success: false, message: '行业保存失败（本地存储不可用），修改未生效' };
+      }
+      return { success: true, data: updated };
     },
+    /**
+     * 删除行业。
+     * 一级行业下仍有二级行业或其自身挂有知识时拒绝删除并说明原因，保持数据原样；
+     * 二级行业可连同其下知识一并删除（由界面二次确认）。
+     */
     deleteIndustry: function (id) {
-      var list = store.getIndustries().filter(function (i) { return i.id !== id; });
-      save('industries', list);
-      var all = load('industryKnowledge', {});
-      delete all[id];
-      save('industryKnowledge', all);
-      return list;
+      var list = store.getIndustries();
+      var target = list.find(function (i) { return i.id === id; });
+      if (!target) {
+        return { success: false, message: '行业不存在或已被删除' };
+      }
+
+      if (!target.level2) {
+        var children = list.filter(function (i) { return i.level1 === target.level1 && i.level2; });
+        if (children.length > 0) {
+          return {
+            success: false,
+            message: '该一级行业下还有 ' + children.length + ' 个二级行业，请先删除二级行业后再删除一级行业'
+          };
+        }
+        var ownKnowledge = store.getIndustryKnowledge(target.id);
+        if (ownKnowledge.length > 0) {
+          return {
+            success: false,
+            message: '该一级行业下还有 ' + ownKnowledge.length + ' 条知识，请先删除或迁移相关知识后再删除'
+          };
+        }
+      }
+
+      var knowledge = load('industryKnowledge', defaultIndustryKnowledge);
+      var deletedKnowledge = Object.prototype.hasOwnProperty.call(knowledge, id) ? knowledge[id] : [];
+
+      // 先写知识、再写行业，任一步失败都保持原样
+      if (Object.prototype.hasOwnProperty.call(knowledge, id)) {
+        var knowledgeSnapshot = JSON.parse(JSON.stringify(knowledge));
+        delete knowledge[id];
+        if (!save('industryKnowledge', knowledge)) {
+          return { success: false, message: '删除失败（本地存储不可用），行业及其知识均未改动' };
+        }
+        var industriesAfter = list.filter(function (i) { return i.id !== id; });
+        if (!save('industries', industriesAfter)) {
+          // 回滚知识，保证列表与知识不出现半删除状态
+          save('industryKnowledge', knowledgeSnapshot);
+          return { success: false, message: '删除失败（本地存储不可用），行业及其知识均未改动' };
+        }
+      } else {
+        var industriesOnly = list.filter(function (i) { return i.id !== id; });
+        if (!save('industries', industriesOnly)) {
+          return { success: false, message: '删除失败（本地存储不可用），行业未改动' };
+        }
+      }
+
+      return { success: true, data: { deletedKnowledgeCount: deletedKnowledge.length } };
     },
     getIndustryKnowledge: function (industryId) {
       var all = load('industryKnowledge', defaultIndustryKnowledge);
@@ -480,22 +592,33 @@
     setIndustryKnowledge: function (industryId, list) {
       var all = load('industryKnowledge', defaultIndustryKnowledge);
       all[industryId] = list;
-      save('industryKnowledge', all);
-      return list;
+      return save('industryKnowledge', all);
     },
     addIndustryKnowledge: function (industryId, item) {
+      var exists = store.getIndustries().some(function (i) { return i.id === industryId; });
+      if (!exists) {
+        return { success: false, message: '所选行业不存在或已被删除，请刷新后重试' };
+      }
       var list = store.getIndustryKnowledge(industryId).slice();
       item.id = item.id || nextId('k');
       list.push(item);
-      store.setIndustryKnowledge(industryId, list);
-      return item;
+      if (!store.setIndustryKnowledge(industryId, list)) {
+        return { success: false, message: '知识保存失败（本地存储不可用），请稍后重试' };
+      }
+      return { success: true, data: item };
     },
     updateIndustryKnowledge: function (industryId, id, item) {
+      var exists = store.getIndustries().some(function (i) { return i.id === industryId; });
+      if (!exists) {
+        return { success: false, message: '所选行业不存在或已被删除' };
+      }
       var list = store.getIndustryKnowledge(industryId).map(function (k) {
         return k.id === id ? Object.assign({}, k, item, { id: id }) : k;
       });
-      store.setIndustryKnowledge(industryId, list);
-      return list;
+      if (!store.setIndustryKnowledge(industryId, list)) {
+        return { success: false, message: '知识保存失败（本地存储不可用），修改未生效' };
+      }
+      return { success: true, data: list };
     },
     deleteIndustryKnowledge: function (industryId, id) {
       var list = store.getIndustryKnowledge(industryId).filter(function (k) { return k.id !== id; });

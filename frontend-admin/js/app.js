@@ -287,21 +287,30 @@
       }
       
       Object.keys(groups).forEach(function (groupLabel) {
+        var validItems = (groups[groupLabel] || []).filter(function (item) {
+          return item && String(item.value || '').trim() !== '' && String(item.label || '').trim() !== '';
+        });
+        if (!String(groupLabel || '').trim() || validItems.length === 0) return;
+
         var optgroup = document.createElement('optgroup');
         optgroup.label = groupLabel;
-        
-        groups[groupLabel].forEach(function (item) {
+
+        validItems.forEach(function (item) {
           var opt = document.createElement('option');
           opt.value = item.value;
           opt.textContent = item.label;
           optgroup.appendChild(opt);
         });
-        
+
         selectEl.appendChild(optgroup);
       });
-      
+
       if (selectedValue !== undefined) {
         selectEl.value = selectedValue;
+        // 选中值在选项中已不存在时回退到占位项，避免静默停留在失效选项上
+        if (selectedValue && selectEl.value !== selectedValue) {
+          selectEl.value = '';
+        }
       }
     }
   };
