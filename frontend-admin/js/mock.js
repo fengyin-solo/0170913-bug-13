@@ -444,35 +444,126 @@
       save('industries', list);
       return list;
     },
-    /** 新增行业：level2 为空表示一级行业，否则为二级行业（挂在该 level1 下） */
+    /**
+     * 新增行业：level2 为空表示一级行业，否则为二级行业（挂在该 level1 下）
+     * @returns {{success:boolean, message?:string, industry?:object}}
+     */
     createIndustry: function (level1, level2) {
+      level1 = (level1 == null ? '' : String(level1)).trim();
+      level2 = (level2 == null ? '' : String(level2)).trim();
+      if (!level1) {
+        return { success: false, message: '一级行业名称不能为空' };
+      }
       var list = store.getIndustries().slice();
-      var id = nextId('IND', list);
-      var name = (level2 == null || level2 === '') ? level1 : (level1 + ' / ' + level2);
-      list.push({ id: id, level1: level1, level2: level2 || '', name: name });
-      save('industries', list);
-      var all = load('industryKnowledge', {});
-      all[id] = [];
-      save('industryKnowledge', all);
-      return list[list.length - 1];
-    },
-    updateIndustry: function (id, level1, level2) {
-      var list = store.getIndustries().map(function (i) {
-        if (i.id !== id) return i;
-        var name = (level2 == null || level2 === '') ? level1 : (level1 + ' / ' + level2);
-        return { id: i.id, level1: level1, level2: level2 || '', name: name };
+      var duplicate = list.some(function (i) {
+        return level2 ? (i.level1 === level1 && i.level2 === level2) : (!i.level2 && i.level1 === level1);
       });
-      save('industries', list);
-      return list;
+      if (duplicate) {
+        return { success: false, message: (level2 ? '二级行业「' + level1 + ' / ' + level2 + '」' : '一级行业「' + level1 + '」') + '已存在，请勿重复添加' };
+      }
+      var id = nextId('IND', list);
+      var name = level2 ? (level1 + ' / ' + level2) : level1;
+      var industry = { id: id, level1: level1, level2: level2, name: name };
+      try {
+        list.push(industry);
+        save('industries', list);
+        var all = load('industryKnowledge', {});
+        all[id] = [];
+        save('industryKnowledge', all);
+      } catch (e) {
+        return { success: false, message: '行业创建失败（本地数据写入异常），请重试' };
+      }
+      return { success: true, industry: industry };
     },
+
+    /**
+     * 编辑行业
+     * 规则：一级行业不允许直接改成二级（会导致其下二级失去归属），
+     *       一级行业改名时同步更新其下二级的所属分类；重名时拒绝。
+     * @returns {{success:boolean, message?:string}}
+     */
+    updateIndustry: function (id, level1, level2) {
+      level1 = (level1 == null ? '' : String(level1)).trim();
+      level2 = (level2 == null ? '' : String(level2)).trim();
+      if (!level1) {
+        return { success: false, message: '一级行业名称不能为空' };
+      }
+      var origin = store.getIndustries();
+      var target = origin.find(function (i) { return i.id === id; });
+      if (!target) {
+        return { success: false, message: '待编辑的行业不存在或已被删除，列表可能已过期，请刷新后重试' };
+      }
+      // 一级 → 二级 会令原有子级失去归属，禁止
+      if (!target.level2 && level2) {
+        return { success: false, message: '不能把一级行业直接改为二级；如需新增二级，请在该一级下「新增行业」' };
+      }
+      var duplicate = origin.some(function (i) {
+        if (i.id === id) return false;
+        return level2 ? (i.level1 === level1 && i.level2 === level2) : (!i.level2 && i.level1 === level1);
+      });
+      if (duplicate) {
+        return { success: false, message: (level2 ? '二级行业「' + level1 + ' / ' + level2 + '」' : '一级行业「' + level1 + '」') + '已存在' };
+      }
+      try {
+        // 一级改名：联动其下二级，避免子级成为孤儿
+        var list = origin.map(function (i) {
+          if (i.id === id) {
+            return { id: i.id, level1: level1, level2: level2, name: level2 ? (level1 + ' / ' + level2) : level1 };
+          }
+          // 一级改名：联动其下二级，避免子级成为孤儿
+          if (!target.level2 && i.level1 === target.level1 && i.level2) {
+            return { id: i.id, level1: level1, level2: i.level2, name: level1 + ' / ' + i.level2 };
+          }
+          return i;
+        });
+        save('industries', list);
+      } catch (e) {
+        return { success: false, message: '行业更新失败（本地数据写入异常），请重试' };
+      }
+      return { success: true };
+    },
+
+    /**
+     * 删除行业
+     * 规则：一级行业下仍有二级时拒绝删除（防止子级变孤儿、其下知识丢失归属）；
+     *       删除前校验存在性；行业与其知识分两次写入，中途异常时整体回滚保持原样。
+     * @returns {{success:boolean, message?:string, knowledgeCount?:number, childCount?:number}}
+     */
     deleteIndustry: function (id) {
-      var list = store.getIndustries().filter(function (i) { return i.id !== id; });
-      save('industries', list);
+      var industries = store.getIndustries();
+      var target = industries.find(function (i) { return i.id === id; });
+      if (!target) {
+        return { success: false, message: '该行业不存在或已被删除，请刷新列表后重试' };
+      }
+      if (!target.level2) {
+        var children = industries.filter(function (i) { return i.level1 === target.level1 && i.level2; });
+        if (children.length > 0) {
+          return {
+            success: false,
+            childCount: children.length,
+            message: '该一级行业下还有 ' + children.length + ' 个二级行业，请先删除或调整其下二级行业后再删除'
+          };
+        }
+      }
       var all = load('industryKnowledge', {});
-      delete all[id];
-      save('industryKnowledge', all);
-      return list;
+      var knowledgeCount = (all[id] || []).length;
+      var backupIndustries = industries;
+      var backupKnowledge = JSON.parse(JSON.stringify(all));
+      try {
+        save('industries', industries.filter(function (i) { return i.id !== id; }));
+        delete all[id];
+        save('industryKnowledge', all);
+      } catch (e) {
+        // 写入中断时回滚，保持数据原样
+        try {
+          save('industries', backupIndustries);
+          save('industryKnowledge', backupKnowledge);
+        } catch (_) {}
+        return { success: false, message: '删除过程中本地数据写入失败，已恢复原状，请重试' };
+      }
+      return { success: true, knowledgeCount: knowledgeCount };
     },
+
     getIndustryKnowledge: function (industryId) {
       var all = load('industryKnowledge', defaultIndustryKnowledge);
       return all[industryId] || [];
@@ -483,19 +574,35 @@
       save('industryKnowledge', all);
       return list;
     },
+
+    /**
+     * 新增行业知识
+     * @returns {{success:boolean, message?:string, item?:object}}
+     */
     addIndustryKnowledge: function (industryId, item) {
+      if (!store.getIndustries().some(function (i) { return i.id === industryId; })) {
+        return { success: false, message: '所选行业不存在或已被删除，请重新选择行业' };
+      }
       var list = store.getIndustryKnowledge(industryId).slice();
       item.id = item.id || nextId('k');
       list.push(item);
       store.setIndustryKnowledge(industryId, list);
-      return item;
+      return { success: true, item: item };
     },
+
+    /**
+     * 更新行业知识
+     * @returns {{success:boolean, message?:string}}
+     */
     updateIndustryKnowledge: function (industryId, id, item) {
+      if (!store.getIndustries().some(function (i) { return i.id === industryId; })) {
+        return { success: false, message: '所属行业不存在或已被删除，无法保存知识' };
+      }
       var list = store.getIndustryKnowledge(industryId).map(function (k) {
         return k.id === id ? Object.assign({}, k, item, { id: id }) : k;
       });
       store.setIndustryKnowledge(industryId, list);
-      return list;
+      return { success: true };
     },
     deleteIndustryKnowledge: function (industryId, id) {
       var list = store.getIndustryKnowledge(industryId).filter(function (k) { return k.id !== id; });

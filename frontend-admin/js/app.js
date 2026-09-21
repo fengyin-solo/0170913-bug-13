@@ -287,21 +287,33 @@
       }
       
       Object.keys(groups).forEach(function (groupLabel) {
+        // 过滤空名称选项，避免下拉中出现"没有名称的行业"
+        var validItems = (groups[groupLabel] || []).filter(function (item) {
+          return item && item.value !== '' && item.value != null && item.label;
+        });
+        // 空分组不渲染 optgroup，避免出现标题下空白一片
+        if (!groupLabel || validItems.length === 0) return;
+
         var optgroup = document.createElement('optgroup');
         optgroup.label = groupLabel;
-        
-        groups[groupLabel].forEach(function (item) {
+
+        validItems.forEach(function (item) {
           var opt = document.createElement('option');
           opt.value = item.value;
           opt.textContent = item.label;
           optgroup.appendChild(opt);
         });
-        
+
         selectEl.appendChild(optgroup);
       });
-      
+
       if (selectedValue !== undefined) {
-        selectEl.value = selectedValue;
+        // 选中值已不在选项中（如行业被删除）时回退到占位项，避免下拉显示与数据不一致
+        var stillExists = false;
+        selectEl.querySelectorAll('option').forEach(function (o) {
+          if (o.value === selectedValue) stillExists = true;
+        });
+        selectEl.value = stillExists ? selectedValue : '';
       }
     }
   };

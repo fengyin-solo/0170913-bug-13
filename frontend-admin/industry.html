@@ -47,7 +47,8 @@
             <button type="button" id="btnAddIndustry" class="btn-primary inline-flex items-center gap-2"><span class="iconify" data-icon="lucide:plus" data-width="16" data-height="16"></span>新增行业</button>
           </div>
           <div class="premium-card overflow-hidden rounded-xl border border-slate-100 shadow-sm">
-            <div class="table-wrap">
+            <div id="industryEmpty" class="empty-state hidden">暂无行业，请点击右上角「新增行业」创建。</div>
+            <div id="industryTableWrap" class="table-wrap">
               <table class="w-full text-sm">
                 <thead>
                   <tr>
